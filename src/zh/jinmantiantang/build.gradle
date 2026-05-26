@@ -1,12 +1,26 @@
 ext {
     extName = 'Jinman Tiantang'
     extClass = '.Jinmantiantang'
-    extVersionCode = 56
+    extVersionCode = 57
     isNsfw = true
 }
 
 apply plugin: "kei.plugins.extension.legacy"
 
+android {
+    sourceSets {
+        test {
+            java.directories.clear()
+            java.directories.add("test")
+            kotlin.directories.clear()
+            kotlin.directories.add("test")
+        }
+    }
+}
+
 dependencies {
     implementation(project(":lib:randomua"))
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.3.21'
+    testImplementation 'org.json:json:20230227'
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import okhttp3.Interceptor
 import okhttp3.Response
@@ -54,6 +55,13 @@ internal fun getPreferenceList(context: Context, preferences: SharedPreferences,
         )
         dialogTitle = "关键词列表"
     },
+
+    SwitchPreferenceCompat(context).apply {
+        key = PREF_KEY_USE_APP_API
+        title = "使用APP接口（绕过Cloudflare）"
+        summary = "开启后使用移动端API获取数据，可绕过CF风控，需要重启应用生效"
+        setDefaultValue(false)
+    },
 )
 
 val SharedPreferences.baseUrl: String
@@ -71,6 +79,8 @@ internal const val MAINSITE_RATELIMIT_PREF_DEFAULT = 1.toString()
 
 internal const val MAINSITE_RATELIMIT_PERIOD = "mainSiteRateLimitPeriodPreference"
 internal const val MAINSITE_RATELIMIT_PERIOD_DEFAULT = 3.toString()
+
+internal const val PREF_KEY_USE_APP_API = "useAppApi"
 
 private const val USE_MIRROR_URL_PREF = "useMirrorWebsitePreference"
 

@@ -21,6 +21,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
@@ -42,18 +43,29 @@ class Jinmantiantang :
 
     private val updateUrlInterceptor = UpdateUrlInterceptor(preferences)
 
+    private val useAppApi: Boolean
+        get() = preferences.getBoolean(PREF_KEY_USE_APP_API, false)
+
     // 处理URL请求
-    override val client: OkHttpClient = network.client
-        .newBuilder()
-        // Add rate limit to fix manga thumbnail load failure
-        .rateLimitHost(
-            baseUrl.toHttpUrl(),
-            preferences.getString(MAINSITE_RATELIMIT_PREF, MAINSITE_RATELIMIT_PREF_DEFAULT)!!.toInt(),
-            preferences.getString(MAINSITE_RATELIMIT_PERIOD, MAINSITE_RATELIMIT_PERIOD_DEFAULT)!!.toLong(),
-        )
-        .apply { interceptors().add(0, updateUrlInterceptor) }
-        .addInterceptor(ScrambledImageInterceptor)
-        .build()
+    override val client: OkHttpClient by lazy {
+        if (useAppApi) {
+            network.client.newBuilder()
+                .addInterceptor(JmTokenInterceptor())
+                .addInterceptor(JmImageInterceptor())
+                .build()
+        } else {
+            network.client.newBuilder()
+                // Add rate limit to fix manga thumbnail load failure
+                .rateLimitHost(
+                    baseUrl.toHttpUrl(),
+                    preferences.getString(MAINSITE_RATELIMIT_PREF, MAINSITE_RATELIMIT_PREF_DEFAULT)!!.toInt(),
+                    preferences.getString(MAINSITE_RATELIMIT_PERIOD, MAINSITE_RATELIMIT_PERIOD_DEFAULT)!!.toLong(),
+                )
+                .apply { interceptors().add(0, updateUrlInterceptor) }
+                .addInterceptor(ScrambledImageInterceptor)
+                .build()
+        }
+    }
 
     // 添加额外的header增加规避Cloudflare可能性
     override fun headersBuilder() = super.headersBuilder()
@@ -70,6 +82,20 @@ class Jinmantiantang :
         }.filterGenre()
         val hasNextPage = document.selectFirst("a.prevnext") != null
         return MangasPage(mangas, hasNextPage)
+    }
+
+    override fun fetchPopularManga(page: Int): Observable<MangasPage> {
+        if (!useAppApi) return super.fetchPopularManga(page)
+
+        return client.newCall(GET(JmApiClient.buildPopularUrl(page), headers))
+            .asObservableSuccess()
+            .map { response ->
+                val ts = JmApiClient.extractTsFromResponse(response)
+                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                JmApiClient.parseSearchPage(JSONObject(decrypted)).let { result ->
+                    MangasPage(result.mangas.filterGenre(), result.hasNextPage)
+                }
+            }
     }
 
     private fun List<SManga>.filterGenre(): List<SManga> {
@@ -101,6 +127,20 @@ class Jinmantiantang :
 
     override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
 
+    override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
+        if (!useAppApi) return super.fetchLatestUpdates(page)
+
+        return client.newCall(GET(JmApiClient.buildLatestUrl(page), headers))
+            .asObservableSuccess()
+            .map { response ->
+                val ts = JmApiClient.extractTsFromResponse(response)
+                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                JmApiClient.parseSearchPage(JSONObject(decrypted)).let { result ->
+                    MangasPage(result.mangas.filterGenre(), result.hasNextPage)
+                }
+            }
+    }
+
     // For JinmantiantangUrlActivity
     private fun searchMangaByIdRequest(id: String) = GET("$baseUrl/album/$id", headers)
 
@@ -119,13 +159,63 @@ class Jinmantiantang :
             val titleid = url.pathSegments[1]
             return fetchSearchManga(page, "$PREFIX_ID_SEARCH$titleid", filters)
         }
-        return if (query.startsWith(PREFIX_ID_SEARCH_NO_COLON, true) || query.toIntOrNull() != null) {
+        if (query.startsWith(PREFIX_ID_SEARCH_NO_COLON, true) || query.toIntOrNull() != null) {
             val id = query.removePrefix(PREFIX_ID_SEARCH_NO_COLON).removePrefix(":")
-            client.newCall(searchMangaByIdRequest(id))
-                .asObservableSuccess()
-                .map { response -> searchMangaByIdParse(response, id) }
+            return if (useAppApi) {
+                client.newCall(GET(JmApiClient.buildApiUrl("${JmApiClient.API_ALBUM}?id=$id"), headers))
+                    .asObservableSuccess()
+                    .map { response ->
+                        val ts = JmApiClient.extractTsFromResponse(response)
+                        val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                        val manga = JmApiClient.parseAlbumDetail(JSONObject(decrypted))
+                        manga.url = "/album/$id/"
+                        MangasPage(listOf(manga), false)
+                    }
+            } else {
+                client.newCall(searchMangaByIdRequest(id))
+                    .asObservableSuccess()
+                    .map { response -> searchMangaByIdParse(response, id) }
+            }
+        }
+        if (!useAppApi) return super.fetchSearchManga(page, query, filters)
+
+        // APP API 搜索
+        val filterParams = filters.filterIsInstance<UriPartFilter>()
+        val orderBy = filterParams.filterIsInstance<SortFilter>().firstOrNull()
+            ?.let { it.vals[it.state].second.substringAfter("o=").substringBefore("&") } ?: "mr"
+        val time = filterParams.filterIsInstance<TimeFilter>().firstOrNull()
+            ?.let { it.vals[it.state].second.substringAfter("t=").substringBefore("&") } ?: "a"
+        val mainTag = filterParams.filterIsInstance<TypeFilter>().firstOrNull()
+            ?.let { it.vals[it.state].second.substringAfter("main_tag=").toIntOrNull() } ?: 0
+
+        val apiUrl = if (query.isNotEmpty()) {
+            JmApiClient.buildSearchUrl(query, page, orderBy, time, mainTag)
         } else {
-            super.fetchSearchManga(page, query, filters)
+            // 处理分类筛选
+            val category = filterParams.filterIsInstance<CategoryGroup>().firstOrNull()
+                ?.let { extractCategoryForApi(it) } ?: ""
+            JmApiClient.buildCategoriesFilterUrl(page, category, orderBy, time)
+        }
+
+        return client.newCall(GET(apiUrl, headers))
+            .asObservableSuccess()
+            .map { response ->
+                val ts = JmApiClient.extractTsFromResponse(response)
+                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                JmApiClient.parseSearchPage(JSONObject(decrypted)).let { result ->
+                    MangasPage(result.mangas.filterGenre(), result.hasNextPage)
+                }
+            }
+    }
+
+    private fun extractCategoryForApi(filter: CategoryGroup): String {
+        val uriPart = filter.toUriPart()
+        // 从 Web URL 路径中提取分类名
+        // 例如 "/albums/doujin?" -> "doujin", "/albums?" -> ""
+        return when {
+            uriPart.startsWith("/albums/") -> uriPart.removePrefix("/albums/").substringBefore("?").substringBefore("/")
+            uriPart.contains("search_query=") -> uriPart.substringAfter("search_query=").substringBefore("&")
+            else -> ""
         }
     }
 
@@ -207,7 +297,85 @@ class Jinmantiantang :
         description = document.selectFirst("#intro-block .p-t-5.p-b-5")?.text()?.substringAfter("敘述：")?.trim() ?: ""
     }
 
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
+        if (!useAppApi) return super.fetchMangaDetails(manga)
+
+        val albumId = extractAlbumIdFromUrl(manga.url)
+        val apiUrl = JmApiClient.buildApiUrl("${JmApiClient.API_ALBUM}?id=$albumId")
+
+        return client.newCall(GET(apiUrl, headers))
+            .asObservableSuccess()
+            .map { response ->
+                val ts = JmApiClient.extractTsFromResponse(response)
+                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                JmApiClient.parseAlbumDetail(JSONObject(decrypted))
+            }
+    }
+
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+        if (!useAppApi) return super.fetchChapterList(manga)
+
+        val albumId = extractAlbumIdFromUrl(manga.url)
+        val apiUrl = JmApiClient.buildApiUrl("${JmApiClient.API_ALBUM}?id=$albumId")
+
+        return client.newCall(GET(apiUrl, headers))
+            .asObservableSuccess()
+            .map { response ->
+                val ts = JmApiClient.extractTsFromResponse(response)
+                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                JmApiClient.parseChapterList(JSONObject(decrypted))
+            }
+    }
+
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        if (!useAppApi) return super.fetchPageList(chapter)
+
+        val chapterId = extractChapterIdFromUrl(chapter.url)
+        val apiUrl = JmApiClient.buildApiUrl("${JmApiClient.API_CHAPTER}?id=$chapterId")
+
+        return client.newCall(GET(apiUrl, headers))
+            .asObservableSuccess()
+            .map { response ->
+                val ts = JmApiClient.extractTsFromResponse(response)
+                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
+                val json = JSONObject(decrypted)
+                val photoId = json.optString("id", json.optInt("id", 0).toString())
+                if (photoId == "0" || photoId.isEmpty()) {
+                    throw Exception("章节数据无效 (requested=$chapterId)")
+                }
+                val images = json.optJSONArray("images")
+                if (images == null || images.length() == 0) {
+                    throw Exception("无法获取章节图片列表 (photo_id=$photoId)")
+                }
+                val imageDomain = JmApiClient.getImageDomain()
+
+                (0 until images.length()).mapNotNull { i ->
+                    val imgName = images.optString(i, "").ifEmpty { return@mapNotNull null }
+                    val imageUrl = "https://$imageDomain/media/photos/$photoId/$imgName?scramble_id=$SCRAMBLE_ID_DEFAULT&aid=$photoId"
+                    Page(i, imageUrl = imageUrl)
+                }
+            }
+    }
+
     override fun getMangaUrl(manga: SManga) = "$baseUrl${manga.url}"
+
+    /**
+     * 从 manga.url 中提取 album ID
+     * 支持格式: "/album/123/", "/album/123", "/album?id=123"
+     */
+    private fun extractAlbumIdFromUrl(url: String): String {
+        if (url.contains("?id=")) return url.substringAfter("?id=").substringBefore("&")
+        return url.trimEnd('/').substringAfterLast("/")
+    }
+
+    /**
+     * 从 chapter.url 中提取 chapter ID
+     * 支持格式: "/chapter?id=123", "/photo/123"
+     */
+    private fun extractChapterIdFromUrl(url: String): String {
+        if (url.contains("?id=")) return url.substringAfter("?id=").substringBefore("&")
+        return url.trimEnd('/').substringAfterLast("/")
+    }
 
     private fun Element.extractThumbnailUrl(): String = when {
         hasAttr("data-original") -> attr("data-original")
@@ -310,5 +478,6 @@ class Jinmantiantang :
     companion object {
         private const val PREFIX_ID_SEARCH_NO_COLON = "JM"
         const val PREFIX_ID_SEARCH = "$PREFIX_ID_SEARCH_NO_COLON:"
+        private const val SCRAMBLE_ID_DEFAULT = 220980
     }
 }
