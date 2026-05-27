@@ -22,5 +22,5 @@ dependencies {
     implementation(project(":lib:randomua"))
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.3.21'
-    testImplementation 'org.json:json:20230227'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1'
 }

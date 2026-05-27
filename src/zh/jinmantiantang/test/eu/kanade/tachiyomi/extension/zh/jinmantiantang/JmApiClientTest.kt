@@ -1,13 +1,15 @@
 package eu.kanade.tachiyomi.extension.zh.jinmantiantang
 
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Test
-import org.json.JSONObject
 
 class JmApiClientTest {
+    private val json = Json { ignoreUnknownKeys = true }
+
     @Test
     fun testParseAlbumDetail_SingleChapter() {
-        val json = JSONObject("""
+        val jsonStr = """
             {
                 "id": 123,
                 "name": "Test Album",
@@ -17,29 +19,30 @@ class JmApiClientTest {
                 "series": [],
                 "series_id": "0"
             }
-        """.trimIndent())
+        """.trimIndent()
 
-        val detail = JmApiClient.parseAlbumDetailRaw(json)
-        assertEquals(123, detail.id)
-        assertEquals("Test Album", detail.title)
-        assertEquals("Author1", detail.author)
-        assertEquals("tag1, tag2", detail.genre)
-        assertEquals("Desc", detail.description)
+        val dto = json.decodeFromString<AlbumDto>(jsonStr)
+        assertEquals(123, dto.id)
+        assertEquals("Test Album", dto.name)
+        assertEquals("Author1", dto.author.joinToString(", "))
+        assertEquals("tag1, tag2", dto.tags.joinToString(", "))
+        assertEquals("Desc", dto.description)
     }
 
     @Test
     fun testParseChapterList_SingleChapterFallback() {
-        val json = JSONObject("""
+        val jsonStr = """
             {
                 "id": 123,
                 "name": "Test Album",
                 "series": [],
                 "series_id": "0"
             }
-        """.trimIndent())
+        """.trimIndent()
 
-        val chapters = JmApiClient.parseChapterListRaw(json)
+        val dto = json.decodeFromString<AlbumDto>(jsonStr)
+        val chapters = JmApiClient.parseChapterList(dto)
         assertEquals(1, chapters.size)
-        assertEquals(123, chapters[0].id)
+        assertEquals("/photo/123", chapters[0].url)
     }
 }

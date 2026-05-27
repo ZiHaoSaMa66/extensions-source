@@ -15,7 +15,6 @@ internal class CategoryGroup :
             Pair("单本", "/albums/single?"),
             Pair("汉化", "/albums/doujin/sub/chinese?"),
             Pair("日语", "/albums/doujin/sub/japanese?"),
-            Pair("汉化", "/albums/doujin/sub/chinese?"),
             Pair("Cosplay", "/albums/doujin/sub/cosplay?"),
             Pair("CG图集", "/albums/doujin/sub/CG?"),
 

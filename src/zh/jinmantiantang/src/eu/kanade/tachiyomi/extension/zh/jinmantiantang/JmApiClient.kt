@@ -1,14 +1,20 @@
 package eu.kanade.tachiyomi.extension.zh.jinmantiantang
 
 import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import kotlinx.serialization.json.Json
 import okhttp3.Interceptor
 import okhttp3.Response
-import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 object JmApiClient {
+    val json = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
+
     private val IMAGE_DOMAINS = listOf(
         "cdn-msp.jmapiproxy1.cc",
         "cdn-msp.jmapiproxy2.cc",
@@ -22,20 +28,6 @@ object JmApiClient {
     const val API_CATEGORIES_FILTER = "/categories/filter"
     const val API_ALBUM = "/album"
     const val API_CHAPTER = "/chapter"
-
-    data class AlbumDetail(
-        val id: Int,
-        val title: String,
-        val author: String,
-        val genre: String,
-        val description: String,
-    )
-
-    data class ChapterEntry(
-        val id: Int,
-        val name: String,
-        val sort: Int,
-    )
 
     // 记录失败的图片CDN域名（线程安全）
     private val failedImageDomains = ConcurrentHashMap<String, Long>()
@@ -72,99 +64,69 @@ object JmApiClient {
         failedImageDomains.clear()
     }
 
-    fun parseAlbumDetail(json: JSONObject): SManga {
-        val detail = parseAlbumDetailRaw(json)
-        return SManga.create().apply {
-            url = "/album/${detail.id}/"
-            title = detail.title
-            author = detail.author
-            genre = detail.genre
-            description = detail.description
-            thumbnail_url = "https://${getImageDomain()}/media/albums/${detail.id}_3x4.jpg"
-        }
+    fun parseAlbumDetail(dto: AlbumDto): SManga = SManga.create().apply {
+        url = "/album/${dto.id}/"
+        title = dto.name
+        author = dto.author.joinToString()
+        genre = dto.tags.joinToString()
+        description = dto.description ?: ""
+        thumbnail_url = "https://${getImageDomain()}/media/albums/${dto.id}_3x4.jpg"
     }
 
-    fun parseAlbumDetailRaw(json: JSONObject): AlbumDetail = AlbumDetail(
-        id = json.optInt("id", json.optString("id", "0").toIntOrNull() ?: 0),
-        title = json.optString("name", ""),
-        author = json.optJSONArray("author")?.let { arr ->
-            (0 until arr.length()).joinToString(", ") { arr.getString(it) }
-        } ?: json.optString("author", ""),
-        genre = json.optJSONArray("tags")?.let { arr ->
-            (0 until arr.length()).joinToString(", ") { arr.getString(it) }
-        } ?: "",
-        description = if (json.isNull("description")) "" else json.optString("description", ""),
-    )
-
-    fun parseChapterList(json: JSONObject): List<SChapter> {
-        val albumId = json.optString("id", json.optInt("id", 0).toString())
-        val series = json.optJSONArray("series")
-
-        if (series == null || series.length() == 0) {
+    fun parseChapterList(dto: AlbumDto): List<SChapter> {
+        if (dto.series.isEmpty()) {
             return listOf(
                 SChapter.create().apply {
-                    url = "/photo/$albumId"
-                    name = json.getString("name")
+                    url = "/photo/${dto.id}"
+                    name = dto.name
                     chapter_number = 1f
                 },
             )
         }
 
-        return (0 until series.length()).map { i ->
-            val chap = series.getJSONObject(i)
-            val chapId = chap.optString("id", chap.optInt("id", 0).toString())
+        return dto.series.mapIndexed { i, chap ->
             SChapter.create().apply {
-                url = "/photo/$chapId"
-                name = chap.getString("name")
-                chapter_number = chap.optString("sort", "${i + 1}").toFloatOrNull() ?: (i + 1).toFloat()
+                url = "/photo/${chap.id}"
+                name = chap.name
+                chapter_number = chap.sort.toFloatOrNull() ?: (i + 1).toFloat()
             }
         }.reversed()
     }
 
-    fun parseChapterListRaw(json: JSONObject): List<ChapterEntry> {
-        val albumId = json.getInt("id")
-        val series = json.optJSONArray("series")
-
-        if (series == null || series.length() == 0) {
-            return listOf(ChapterEntry(id = albumId, name = json.getString("name"), sort = 1))
-        }
-
-        return (0 until series.length()).map { i ->
-            val chap = series.getJSONObject(i)
-            ChapterEntry(
-                id = chap.getInt("id"),
-                name = chap.getString("name"),
-                sort = chap.optInt("sort", i + 1),
-            )
-        }.reversed()
-    }
-
-    fun parseSearchPage(json: JSONObject): MangasPage {
-        val content = json.optJSONArray("content")
-        if (content == null || content.length() == 0) {
+    fun parseSearchPage(dto: SearchResultDto): MangasPage {
+        if (dto.content.isEmpty()) {
             return MangasPage(emptyList(), false)
         }
 
-        val mangas = (0 until content.length()).map { i ->
-            val item = content.getJSONObject(i)
+        val mangas = dto.content.map { item ->
             SManga.create().apply {
-                val id = item.getString("id")
-                url = "/album/$id/"
-                title = item.getString("name")
-                author = item.optJSONArray("author")?.let { arr ->
-                    (0 until arr.length()).joinToString(", ") { idx -> arr.getString(idx) }
-                } ?: item.optString("author", "")
-                genre = item.optJSONArray("category")?.let { arr ->
-                    (0 until arr.length()).joinToString(", ") { idx -> arr.getString(idx) }
-                } ?: ""
-                thumbnail_url = "https://${getImageDomain()}/media/albums/${id}_3x4.jpg"
+                url = "/album/${item.id}/"
+                title = item.name
+                author = item.author.joinToString()
+                genre = item.category.joinToString()
+                thumbnail_url = "https://${getImageDomain()}/media/albums/${item.id}_3x4.jpg"
             }
         }
 
-        val total = json.optInt("total", 0)
-        val hasNextPage = mangas.size < total
+        val hasNextPage = mangas.size < dto.total
 
         return MangasPage(mangas, hasNextPage)
+    }
+
+    fun parsePageList(dto: ChapterPageDto): List<Page> {
+        val photoId = dto.id.toString()
+        if (photoId == "0") {
+            throw Exception("章节数据无效")
+        }
+        if (dto.images.isEmpty()) {
+            throw Exception("无法获取章节图片列表 (photo_id=$photoId)")
+        }
+        val imageDomain = getImageDomain()
+        return dto.images.mapIndexedNotNull { i, imgName ->
+            if (imgName.isEmpty()) return@mapIndexedNotNull null
+            val imageUrl = "https://$imageDomain/media/photos/$photoId/$imgName?scramble_id=$SCRAMBLE_ID_DEFAULT&aid=$photoId"
+            Page(i, imageUrl = imageUrl)
+        }
     }
 
     fun buildSearchUrl(query: String, page: Int, orderBy: String, time: String, mainTag: Int): String = buildApiUrl("$API_SEARCH?search_query=$query&page=$page&o=$orderBy&t=$time&main_tag=$mainTag")
@@ -180,10 +142,12 @@ object JmApiClient {
 
     fun buildApiUrl(path: String, domain: String = "www.cdnhjk.net"): String = "https://$domain$path"
 
-    fun decryptApiResponse(responseBody: String, ts: Long): String {
-        val json = JSONObject(responseBody)
-        val data = json.getString("data")
-        return JmCrypto.decryptData(data, ts)
+    /**
+     * 解密 API 响应：先提取加密的 data 字段，再用 AES 解密
+     */
+    fun decryptResponseBody(responseBody: String, ts: Long): String {
+        val apiResponse = json.decodeFromString<JmApiResponseDto>(responseBody)
+        return JmCrypto.decryptData(apiResponse.data, ts)
     }
 
     /**
@@ -194,6 +158,8 @@ object JmApiClient {
         val tokenparam = response.request.header("tokenparam") ?: return System.currentTimeMillis() / 1000
         return tokenparam.substringBefore(",").toLongOrNull() ?: (System.currentTimeMillis() / 1000)
     }
+
+    private const val SCRAMBLE_ID_DEFAULT = 220980
 }
 
 class JmTokenInterceptor : Interceptor {

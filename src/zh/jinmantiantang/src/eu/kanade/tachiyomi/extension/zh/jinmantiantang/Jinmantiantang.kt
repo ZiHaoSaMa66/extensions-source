@@ -15,13 +15,14 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.lib.randomua.addRandomUAPreference
 import keiyoushi.lib.randomua.setRandomUserAgent
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferences
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
@@ -91,8 +92,8 @@ class Jinmantiantang :
             .asObservableSuccess()
             .map { response ->
                 val ts = JmApiClient.extractTsFromResponse(response)
-                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                JmApiClient.parseSearchPage(JSONObject(decrypted)).let { result ->
+                val dto = response.parseAs<SearchResultDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                JmApiClient.parseSearchPage(dto).let { result ->
                     MangasPage(result.mangas.filterGenre(), result.hasNextPage)
                 }
             }
@@ -134,8 +135,8 @@ class Jinmantiantang :
             .asObservableSuccess()
             .map { response ->
                 val ts = JmApiClient.extractTsFromResponse(response)
-                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                JmApiClient.parseSearchPage(JSONObject(decrypted)).let { result ->
+                val dto = response.parseAs<SearchResultDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                JmApiClient.parseSearchPage(dto).let { result ->
                     MangasPage(result.mangas.filterGenre(), result.hasNextPage)
                 }
             }
@@ -166,8 +167,8 @@ class Jinmantiantang :
                     .asObservableSuccess()
                     .map { response ->
                         val ts = JmApiClient.extractTsFromResponse(response)
-                        val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                        val manga = JmApiClient.parseAlbumDetail(JSONObject(decrypted))
+                        val dto = response.parseAs<AlbumDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                        val manga = JmApiClient.parseAlbumDetail(dto)
                         manga.url = "/album/$id/"
                         MangasPage(listOf(manga), false)
                     }
@@ -180,19 +181,18 @@ class Jinmantiantang :
         if (!useAppApi) return super.fetchSearchManga(page, query, filters)
 
         // APP API 搜索
-        val filterParams = filters.filterIsInstance<UriPartFilter>()
-        val orderBy = filterParams.filterIsInstance<SortFilter>().firstOrNull()
+        val orderBy = filters.firstInstanceOrNull<SortFilter>()
             ?.let { it.vals[it.state].second.substringAfter("o=").substringBefore("&") } ?: "mr"
-        val time = filterParams.filterIsInstance<TimeFilter>().firstOrNull()
+        val time = filters.firstInstanceOrNull<TimeFilter>()
             ?.let { it.vals[it.state].second.substringAfter("t=").substringBefore("&") } ?: "a"
-        val mainTag = filterParams.filterIsInstance<TypeFilter>().firstOrNull()
+        val mainTag = filters.firstInstanceOrNull<TypeFilter>()
             ?.let { it.vals[it.state].second.substringAfter("main_tag=").toIntOrNull() } ?: 0
 
         val apiUrl = if (query.isNotEmpty()) {
             JmApiClient.buildSearchUrl(query, page, orderBy, time, mainTag)
         } else {
             // 处理分类筛选
-            val category = filterParams.filterIsInstance<CategoryGroup>().firstOrNull()
+            val category = filters.firstInstanceOrNull<CategoryGroup>()
                 ?.let { extractCategoryForApi(it) } ?: ""
             JmApiClient.buildCategoriesFilterUrl(page, category, orderBy, time)
         }
@@ -201,8 +201,8 @@ class Jinmantiantang :
             .asObservableSuccess()
             .map { response ->
                 val ts = JmApiClient.extractTsFromResponse(response)
-                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                JmApiClient.parseSearchPage(JSONObject(decrypted)).let { result ->
+                val dto = response.parseAs<SearchResultDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                JmApiClient.parseSearchPage(dto).let { result ->
                     MangasPage(result.mangas.filterGenre(), result.hasNextPage)
                 }
             }
@@ -307,8 +307,8 @@ class Jinmantiantang :
             .asObservableSuccess()
             .map { response ->
                 val ts = JmApiClient.extractTsFromResponse(response)
-                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                JmApiClient.parseAlbumDetail(JSONObject(decrypted))
+                val dto = response.parseAs<AlbumDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                JmApiClient.parseAlbumDetail(dto)
             }
     }
 
@@ -322,8 +322,8 @@ class Jinmantiantang :
             .asObservableSuccess()
             .map { response ->
                 val ts = JmApiClient.extractTsFromResponse(response)
-                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                JmApiClient.parseChapterList(JSONObject(decrypted))
+                val dto = response.parseAs<AlbumDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                JmApiClient.parseChapterList(dto)
             }
     }
 
@@ -337,23 +337,8 @@ class Jinmantiantang :
             .asObservableSuccess()
             .map { response ->
                 val ts = JmApiClient.extractTsFromResponse(response)
-                val decrypted = JmApiClient.decryptApiResponse(response.body.string(), ts)
-                val json = JSONObject(decrypted)
-                val photoId = json.optString("id", json.optInt("id", 0).toString())
-                if (photoId == "0" || photoId.isEmpty()) {
-                    throw Exception("章节数据无效 (requested=$chapterId)")
-                }
-                val images = json.optJSONArray("images")
-                if (images == null || images.length() == 0) {
-                    throw Exception("无法获取章节图片列表 (photo_id=$photoId)")
-                }
-                val imageDomain = JmApiClient.getImageDomain()
-
-                (0 until images.length()).mapNotNull { i ->
-                    val imgName = images.optString(i, "").ifEmpty { return@mapNotNull null }
-                    val imageUrl = "https://$imageDomain/media/photos/$photoId/$imgName?scramble_id=$SCRAMBLE_ID_DEFAULT&aid=$photoId"
-                    Page(i, imageUrl = imageUrl)
-                }
+                val dto = response.parseAs<ChapterPageDto>(JmApiClient.json) { JmApiClient.decryptResponseBody(it, ts) }
+                JmApiClient.parsePageList(dto)
             }
     }
 
@@ -364,8 +349,8 @@ class Jinmantiantang :
      * 支持格式: "/album/123/", "/album/123", "/album?id=123"
      */
     private fun extractAlbumIdFromUrl(url: String): String {
-        if (url.contains("?id=")) return url.substringAfter("?id=").substringBefore("&")
-        return url.trimEnd('/').substringAfterLast("/")
+        val httpUrl = "${baseUrl}$url".toHttpUrl()
+        return httpUrl.queryParameter("id") ?: httpUrl.pathSegments.last { it.isNotEmpty() }
     }
 
     /**
@@ -373,8 +358,8 @@ class Jinmantiantang :
      * 支持格式: "/chapter?id=123", "/photo/123"
      */
     private fun extractChapterIdFromUrl(url: String): String {
-        if (url.contains("?id=")) return url.substringAfter("?id=").substringBefore("&")
-        return url.trimEnd('/').substringAfterLast("/")
+        val httpUrl = "${baseUrl}$url".toHttpUrl()
+        return httpUrl.queryParameter("id") ?: httpUrl.pathSegments.last { it.isNotEmpty() }
     }
 
     private fun Element.extractThumbnailUrl(): String = when {
@@ -478,6 +463,5 @@ class Jinmantiantang :
     companion object {
         private const val PREFIX_ID_SEARCH_NO_COLON = "JM"
         const val PREFIX_ID_SEARCH = "$PREFIX_ID_SEARCH_NO_COLON:"
-        private const val SCRAMBLE_ID_DEFAULT = 220980
     }
 }

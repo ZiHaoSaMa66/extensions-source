@@ -8,8 +8,8 @@ import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
-import java.io.ByteArrayOutputStream
+import okhttp3.ResponseBody.Companion.asResponseBody
+import okio.Buffer
 
 class JmImageInterceptor : Interceptor {
     companion object {
@@ -162,12 +162,12 @@ class JmImageInterceptor : Interceptor {
 
         srcBitmap.recycle()
 
-        val output = ByteArrayOutputStream()
-        decodedBitmap.compress(Bitmap.CompressFormat.WEBP, 100, output)
+        val buffer = Buffer()
+        decodedBitmap.compress(Bitmap.CompressFormat.WEBP, 100, buffer.outputStream())
         decodedBitmap.recycle()
 
         return response.newBuilder()
-            .body(output.toByteArray().toResponseBody("image/webp".toMediaType()))
+            .body(buffer.asResponseBody("image/webp".toMediaType()))
             .build()
     }
 }
